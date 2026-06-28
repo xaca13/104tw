@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>徵數位處理訂單員｜彈性兼職、月收5萬不是夢</title>
+    <meta name="description" content="不限年齡、無需經驗，手機即可操作的高薪兼職工作。時薪220-260元，時間彈性自由安排。立即加入LINE了解詳情！" />
+    <script type="module" crossorigin src="/assets/index-DwTeDnDi.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Bj4wgTjJ.css">
+  <script data-kuse-bridge>/*
+ * Kuse edit bridge.
+ *
+ * Runs inside a Kuse-built website when served through the Kuse editor's
+ * preview iframe. Lets the user click DOM elements, annotate them with a
+ * comment, queue up multiple selections, and push the whole batch into
+ * the chat as a single turn.
+ *
+ * Two safety gates keep this inert anywhere outside the editor:
+ *
+ *   1. Direct URL visits (window.top === window.self) early-return. A
+ *      shared site link never loads any of this code's behaviour —
+ *      not the select mode, not the popover, not the batch bar.
+ *   2. Inbound postMessage handlers validate event.origin against a
+ *      small allowlist of Kuse hosts. Random third-party iframes that
+ *      try to drive the bridge are ignored.
+ *
+ * The bridge never talks to our API directly; it only postMessages its
+ * parent (the Kuse editor). The editor is responsible for forwarding
+ * into the chat turn. Worst case someone escapes both gates: they can
+ * observe DOM they already had access to.
+ *
+ * The flow is modelled on Figma comment mode:
+ *   - Hover → blue outline follows the mouse.
+ *   - Click → popover anchored to the element, textarea for the comment.
+ *   - Enter in textarea → element queued, popover closes, a numbered
+ *     brand-colour badge stays on the element.
+ *   - Batch bar pinned to bottom-right shows each queued item (tag +
+ *     class hint + truncated comment); per-row × removes, Send dispatches
+ *     the full batch, Clear wipes.
+ *   - ESC anywhere either closes the popover or exits select mode.
+ */
+(function () {
+  'use strict';
+
+  if (window.top === window.self) return;
+  if (window.__kuseEditBridgeLoaded) return;
+  window.__kuseEditBridgeLoaded = true;
+
+  var ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:3002',
+    'https://app.kuse.ai',
+    'https://app-staging.kuse.ai',
+    'https://app-dev.kuse.ai',
+    'https://kuse.ai',
+  ];
+
+  var BRAND = '#202020';
+  var BRAND_HOVER = '#3d3d3d';
+  var BRAND_LIGHT = 'rgba(32,32,32,0.06)';
+  var BRAND_SOFT = 'rgba(32,32,32,0.12)';
+  var SURFACE = '#ffffff';
+  var SURFACE_ALT = '#faf9f5';
+  var SURFACE_TINT = '#f5f1f0';
+  var TEXT_PRIMARY = '#202020';
+  var TEXT_SECONDARY = '#787876';
+  var TEXT_TERTIARY = '#a8a8a3';
+  var TEXT_MUTED = '#676767';
+  var OVERLAY_Z = 2147483640;
+
+  var STATE = {
+    mode: 'idle',           // 'idle' | 'selecting'
+    locale: 'en',
+    parentOrigin: null,     // set after first allowed message
+    hoverEl: null,          // highlight follows mouse
+    popover: null,          // open editing popover, if any
+    popoverTarget: null,    // the element the popover is editing
+    batch: [],              // [{ id, target, info, comment, badge }]
+    batchBar: null,         // bottom-right floating panel
+    nextId: 1,
+  };
+
+  var I18N = {
+    en: {
+      close: 'Close',
+      closeEsc: 'Close (Esc)',
+      removeFromQueue: 'Click to remove from queue',
+      commentsQueued: function (n) { return n + ' comment' + (n === 1 ? '' : 's') + ' queued'; },
+      queueHelp: 'Click the page to add more, or send when you are done.',
+      exitCommentMode: 'Exit comment mode',
+      noNote: 'No note - agent will infer from the element.',
+      clear: 'Clear',
+      sendComments: function (n) { return 'Send ' + n + ' comment' + (n === 1 ? '' : 's'); },
+      placeholder: 'What should change here?',
+      enterToSend: 'Enter to send  ·  Esc to cancel',
+      addAnother: '+ Add another',
+      addAnotherTitle: 'Queue this comment and pick another element',
+      send: 'Send',
+      sendAll: function (n) { return 'Send all (' + n + ')'; },
+    },
+    zh: {
+      close: '关闭',
+      closeEsc: '关闭（Esc）',
+      removeFromQueue: '点击可从队列中移除',
+      commentsQueued: function (n) { return '已加入 ' + n + ' 条评论'; },
+      queueHelp: '继续点页面添加，或者确认后一起发送。',
+      exitCommentMode: '退出评论模式',
+      noNote: '未填写备注 - agent 会根据元素自行判断。',
+      clear: '清空',
+      sendComments: function (n) { return '发送 ' + n + ' 条评论'; },
+      placeholder: '这里需要改什么？',
+      enterToSend: 'Enter 发送  ·  Esc 取消',
+      addAnother: '+ 再加一个',
+      addAnotherTitle: '把这条评论加入队列，然后继续选择其他元素',
+      send: '发送',
+      sendAll: function (n) { return '全部发送（' + n + '）'; },
+    },
+  };
+
+  function currentLocale() {
+    return /^zh/i.test(STATE.locale || '') ? 'zh' : 'en';
+  }
+
+  function tr(key, arg) {
+    var dict = I18N[currentLocale()] || I18N.en;
+    var val = dict[key];
+    if (typeof val === 'function') return val(arg);
+    return val || I18N.en[key] || key;
+  }
+
+  // -------------------- messaging --------------------
+
+  function isAllowedOrigin(origin) {
+    return ALLOWED_ORIGINS.indexOf(origin) !== -1;
+  }
+
+  function send(payload) {
+    window.parent.postMessage(payload, STATE.parentOrigin || '*');
+  }
+
+  // -------------------- selector + element info --------------------
+
+  // Produces a short unique-ish CSS selector. Not minified to the
+  // shortest possible — agent uses `src` (data-kuse-src) for precision,
+  // selector is just a human-readable hint.
+  function buildSelector(el) {
+    if (!el || el.nodeType !== 1) return '';
+    if (el.id && /^[a-zA-Z_][\w-]*$/.test(el.id)) return '#' + el.id;
+    var parts = [];
+    var node = el;
+    while (node && node.nodeType === 1 && node.tagName !== 'HTML' && parts.length < 6) {
+      var seg = node.tagName.toLowerCase();
+      if (node.classList && node.classList.length) {
+        var classes = [];
+        for (var i = 0; i < node.classList.length && classes.length < 2; i++) {
+          var c = node.classList[i];
+          if (c && !/^__kuse/.test(c)) classes.push(c);
+        }
+        if (classes.length) seg += '.' + classes.join('.');
+      }
+      var parent = node.parentElement;
+      if (parent) {
+        var sameTag = [];
+        for (var j = 0; j < parent.children.length; j++) {
+          if (parent.children[j].tagName === node.tagName) sameTag.push(parent.children[j]);
+        }
+        if (sameTag.length > 1) {
+          seg += ':nth-of-type(' + (sameTag.indexOf(node) + 1) + ')';
+        }
+      }
+      parts.unshift(seg);
+      node = parent;
+    }
+    return parts.join(' > ');
+  }
+
+  function extractInfo(el) {
+    var attrs = {};
+    if (el.className && typeof el.className === 'string') {
+      attrs['class'] = el.className;
+    }
+    if (el.id) attrs['id'] = el.id;
+    var text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length > 200) text = text.slice(0, 200) + '…';
+    return {
+      selector: buildSelector(el),
+      src: el.getAttribute('data-kuse-src') || null,
+      tag: el.tagName,
+      text: text,
+      attrs: attrs,
+    };
+  }
+
+  function classHint(info) {
+    var cls = (info.attrs && info.attrs['class']) || '';
+    var parts = cls.split(/\s+/).filter(function (c) { return c && !/^__kuse/.test(c); });
+    return parts.slice(0, 2).join('.');
+  }
+
+  // humanLabel turns an HTML tag into a plain-English noun users recognise.
+  // Fallback to lowercased tag (e.g. "section") so nothing ever reads as
+  // blank; detailed class hints stay available via the developer tooltip.
+  var TAG_LABELS = {
+    H1: 'Heading', H2: 'Heading', H3: 'Heading',
+    H4: 'Heading', H5: 'Heading', H6: 'Heading',
+    P: 'Paragraph',
+    A: 'Link',
+    BUTTON: 'Button',
+    IMG: 'Image',
+    VIDEO: 'Video',
+    INPUT: 'Input',
+    TEXTAREA: 'Text field',
+    SELECT: 'Dropdown',
+    UL: 'List', OL: 'List', LI: 'List item',
+    NAV: 'Navigation',
+    HEADER: 'Header',
+    FOOTER: 'Footer',
+    SECTION: 'Section',
+    MAIN: 'Main area',
+    ARTICLE: 'Article',
+    ASIDE: 'Sidebar',
+    FORM: 'Form',
+    LABEL: 'Label',
+    SVG: 'Icon',
+    SPAN: 'Text', STRONG: 'Text', EM: 'Text', B: 'Text', I: 'Text',
+  };
+  function humanLabel(info) {
+    var tag = (info.tag || '').toUpperCase();
+    return TAG_LABELS[tag] || tag.toLowerCase();
+  }
+
+  // shortLabel combines the human tag name with the first bit of visible
+  // text, so a row in the batch bar reads like "Heading · Hello world"
+  // instead of "h1.hero-title.text-4xl". Used in list/row contexts.
+  function shortLabel(info) {
+    var base = humanLabel(info);
+    var snippet = (info.text || '').trim();
+    if (snippet.length > 40) snippet = snippet.slice(0, 40) + '…';
+    return snippet ? base + ' · ' + snippet : base;
+  }
+
+  // -------------------- overlay elements --------------------
+
+  // One root div attached to <html> so none of our styles get nuked by
+  // app-level resets on <body>. Children inside are styled inline.
+  function root() {
+    var el = document.getElementById('__kuse-edit-root');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = '__kuse-edit-root';
+    el.style.cssText = 'position:static;all:initial;';
+    document.documentElement.appendChild(el);
+    return el;
+  }
+
+  // Hover outline — follows mouse in select mode.
+  function ensureHover() {
+    if (STATE.hoverEl) return STATE.hoverEl;
+    var el = document.createElement('div');
+    el.setAttribute('data-kuse-overlay', '1');
+    el.style.cssText =
+      'position:fixed;pointer-events:none;z-index:' + OVERLAY_Z + ';' +
+      'border:2px solid rgba(32,32,32,0.28);background:rgba(32,32,32,0.04);' +
+      'border-radius:6px;' +
+      'transition:left 60ms,top 60ms,width 60ms,height 60ms;' +
+      'display:none;box-sizing:border-box;';
+    root().appendChild(el);
+    STATE.hoverEl = el;
+    return el;
+  }
+
+  function moveHover(target) {
+    var el = ensureHover();
+    var rect = target.getBoundingClientRect();
+    el.style.display = 'block';
+    el.style.left = rect.left + 'px';
+    el.style.top = rect.top + 'px';
+    el.style.width = rect.width + 'px';
+    el.style.height = rect.height + 'px';
+  }
+
+  function hideHover() {
+    if (STATE.hoverEl) STATE.hoverEl.style.display = 'none';
+  }
+
+  // -------------------- per-queued-element badges --------------------
+
+  // Persistent numbered circle anchored to the element. Survives mouse
+  // move, reshapes on scroll/resize via rAF tick.
+  function makeBadge(index, item) {
+    var badge = document.createElement('div');
+    badge.setAttribute('data-kuse-overlay', '1');
+    badge.style.cssText =
+      'position:fixed;z-index:' + (OVERLAY_Z + 1) + ';' +
+      'width:22px;height:22px;border-radius:50%;' +
+      'background:' + BRAND + ';color:#ffffff;' +
+      'font:600 11px/22px Poppins,system-ui,-apple-system,sans-serif;' +
+      'text-align:center;cursor:pointer;' +
+      'box-shadow:0 2px 6px rgba(0,0,0,0.18);' +
+      'user-select:none;';
+    badge.textContent = String(index);
+    badge.title = tr('removeFromQueue');
+    badge.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      removeFromBatch(item.id);
+    });
+    root().appendChild(badge);
+    return badge;
+  }
+
+  function positionBadge(item) {
+    if (!item.badge || !item.target) return;
+    var rect = item.target.getBoundingClientRect();
+    item.badge.style.left = (rect.left - 10) + 'px';
+    item.badge.style.top = (rect.top - 10) + 'px';
+  }
+
+  // Persistent outline on queued elements (lighter than hover so the
+  // hover overlay still pops visually when the user mouses over them).
+  function makeSelectedOutline(target) {
+    var el = document.createElement('div');
+    el.setAttribute('data-kuse-overlay', '1');
+    el.style.cssText =
+      'position:fixed;pointer-events:none;z-index:' + (OVERLAY_Z - 1) + ';' +
+      'border:2px solid rgba(32,32,32,0.14);border-radius:6px;' +
+      'box-sizing:border-box;';
+    root().appendChild(el);
+    return el;
+  }
+
+  function positionOutline(item) {
+    if (!item.outline || !item.target) return;
+    var rect = item.target.getBoundingClientRect();
+    item.outline.style.left = rect.left + 'px';
+    item.outline.style.top = rect.top + 'px';
+    item.outline.style.width = rect.width + 'px';
+    item.outline.style.height = rect.height + 'px';
+  }
+
+  function renumberBatch() {
+    for (var i = 0; i < STATE.batch.length; i++) {
+      var item = STATE.batch[i];
+      if (item.badge) item.badge.textContent = String(i + 1);
+    }
+  }
+
+  function removeFromBatch(id) {
+    for (var i = 0; i < STATE.batch.length; i++) {
+      if (STATE.batch[i].id === id) {
+        if (STATE.batch[i].badge) STATE.batch[i].badge.remove();
+        if (STATE.batch[i].outline) STATE.batch[i].outline.remove();
+        STATE.batch.splice(i, 1);
+        break;
+      }
+    }
+    renumberBatch();
+    renderBatchBar();
+  }
+
+  function clearBatch() {
+    for (var i = 0; i < STATE.batch.length; i++) {
+      if (STATE.batch[i].badge) STATE.batch[i].badge.remove();
+      if (STATE.batch[i].outline) STATE.batch[i].outline.remove();
+    }
+    STATE.batch = [];
+    renderBatchBar();
+  }
+
+  function repositionAll() {
+    for (var i = 0; i < STATE.batch.length; i++) {
+      positionBadge(STATE.batch[i]);
+      positionOutline(STATE.batch[i]);
+    }
+  }
+
+  // -------------------- batch bar (bottom-right) --------------------
+
+  function renderBatchBar() {
+    var n = STATE.batch.length;
+    // The batch bar only appears once the user has actually queued a
+    // comment (via "+ Add another"). For the default single-send flow
+    // it stays hidden and the screen is uncluttered.
+    if (n === 0) {
+      if (STATE.batchBar) { STATE.batchBar.remove(); STATE.batchBar = null; }
+      return;
+    }
+    if (!STATE.batchBar) {
+      var bar = document.createElement('div');
+      bar.id = '__kuse-edit-batch';
+      bar.setAttribute('data-kuse-overlay', '1');
+      bar.style.cssText =
+        'position:fixed;right:16px;bottom:16px;z-index:' + (OVERLAY_Z + 2) + ';' +
+        'width:320px;max-height:60vh;' +
+        'background:' + SURFACE + ';border:1px solid ' + BRAND_SOFT + ';' +
+        'border-radius:12px;box-shadow:0 18px 40px rgba(32,32,32,0.12);' +
+        "font:13px Poppins,system-ui,-apple-system,sans-serif;color:" + TEXT_PRIMARY + ';' +
+        'display:flex;flex-direction:column;overflow:hidden;';
+      root().appendChild(bar);
+      STATE.batchBar = bar;
+    }
+    var bar = STATE.batchBar;
+    bar.innerHTML = '';
+
+    // header
+    var header = document.createElement('div');
+    header.style.cssText =
+      'padding:14px 14px 10px;border-bottom:1px solid ' + BRAND_LIGHT + ';' +
+      'display:flex;align-items:center;justify-content:space-between;';
+    var titleWrap = document.createElement('div');
+    titleWrap.style.cssText = 'min-width:0;';
+    var title = document.createElement('div');
+    title.style.cssText = 'font-weight:500;font-size:13px;';
+    title.textContent = tr('commentsQueued', n);
+    titleWrap.appendChild(title);
+    var sub = document.createElement('div');
+    sub.style.cssText = 'font-size:11px;color:' + TEXT_SECONDARY + ';margin-top:2px;line-height:1.45;';
+    sub.textContent = tr('queueHelp');
+    titleWrap.appendChild(sub);
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = tr('exitCommentMode');
+    close.style.cssText =
+      'background:transparent;border:none;cursor:pointer;' +
+      'font-size:20px;line-height:1;color:' + TEXT_SECONDARY + ';padding:0 4px;margin-left:8px;';
+    close.addEventListener('click', function () { exitSelect(); });
+    header.appendChild(titleWrap);
+    header.appendChild(close);
+    bar.appendChild(header);
+
+    // item list
+    if (n > 0) {
+      var list = document.createElement('div');
+      list.style.cssText = 'flex:1 1 auto;overflow-y:auto;padding:8px 8px 0;';
+      for (var i = 0; i < STATE.batch.length; i++) {
+        (function (idx, item) {
+          var row = document.createElement('div');
+          row.style.cssText =
+            'display:flex;align-items:flex-start;gap:8px;' +
+            'padding:10px;border-radius:8px;border:1px solid transparent;' +
+            'cursor:default;';
+          row.addEventListener('mouseenter', function () {
+            row.style.background = SURFACE_ALT;
+            row.style.borderColor = BRAND_LIGHT;
+            if (item.target) moveHover(item.target);
+          });
+          row.addEventListener('mouseleave', function () {
+            row.style.background = 'transparent';
+            row.style.borderColor = 'transparent';
+            hideHover();
+          });
+
+          var num = document.createElement('div');
+          num.style.cssText =
+            'flex:0 0 auto;width:18px;height:18px;border-radius:50%;' +
+            'background:' + BRAND + ';color:#ffffff;' +
+            'font:600 10px/18px inherit;text-align:center;margin-top:1px;';
+          num.textContent = String(idx + 1);
+          row.appendChild(num);
+
+          var body = document.createElement('div');
+          body.style.cssText = 'flex:1 1 auto;min-width:0;';
+          var sel = document.createElement('div');
+          sel.style.cssText =
+            'font-size:11.5px;color:' + TEXT_SECONDARY + ';' +
+            'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+          sel.textContent = shortLabel(item.info);
+          body.appendChild(sel);
+          if (item.comment) {
+            var com = document.createElement('div');
+            com.style.cssText =
+              'margin-top:6px;font-size:12.5px;color:' + TEXT_PRIMARY + ';line-height:1.45;' +
+              'overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;';
+            com.textContent = item.comment;
+            body.appendChild(com);
+          } else {
+            var muted = document.createElement('div');
+            muted.style.cssText = 'margin-top:6px;font-size:12px;color:' + TEXT_TERTIARY + ';font-style:italic;';
+            muted.textContent = tr('noNote');
+            body.appendChild(muted);
+          }
+          row.appendChild(body);
+
+          var rm = document.createElement('button');
+          rm.type = 'button';
+          rm.title = tr('removeFromQueue');
+          rm.textContent = '×';
+          rm.style.cssText =
+            'flex:0 0 auto;background:transparent;border:none;cursor:pointer;' +
+            'color:' + TEXT_SECONDARY + ';font-size:16px;line-height:1;padding:0 4px;';
+          rm.addEventListener('click', function () { removeFromBatch(item.id); });
+          row.appendChild(rm);
+
+          list.appendChild(row);
+        })(i, STATE.batch[i]);
+      }
+      bar.appendChild(list);
+    }
+
+    // footer actions
+    var footer = document.createElement('div');
+    footer.style.cssText =
+      'display:flex;gap:8px;padding:12px 14px 14px;' +
+      'border-top:1px solid ' + BRAND_LIGHT + ';';
+    var clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.textContent = tr('clear');
+    clearBtn.style.cssText =
+      'flex:0 0 auto;height:32px;padding:0 12px;border-radius:8px;' +
+      'background:' + SURFACE + ';border:1px solid ' + BRAND_SOFT + ';' +
+      'font:inherit;font-size:12px;color:' + TEXT_PRIMARY + ';cursor:pointer;';
+    clearBtn.addEventListener('click', function () { clearBatch(); });
+
+    var sendBtn = document.createElement('button');
+    sendBtn.type = 'button';
+    sendBtn.textContent = tr('sendComments', n);
+    sendBtn.style.cssText =
+      'flex:1 1 auto;height:32px;padding:0 12px;border-radius:8px;border:none;' +
+      'background:' + BRAND + ';color:#ffffff;font:inherit;font-size:12px;font-weight:500;' +
+      'cursor:pointer;';
+    sendBtn.addEventListener('click', function () { flushBatch(); });
+    sendBtn.addEventListener('mouseenter', function () { sendBtn.style.background = BRAND_HOVER; });
+    sendBtn.addEventListener('mouseleave', function () { sendBtn.style.background = BRAND; });
+
+    footer.appendChild(clearBtn);
+    footer.appendChild(sendBtn);
+    bar.appendChild(footer);
+  }
+
+  // -------------------- comment popover --------------------
+
+  function closePopover() {
+    if (STATE.popover) {
+      STATE.popover.remove();
+      STATE.popover = null;
+      STATE.popoverTarget = null;
+    }
+  }
+
+  function showPopover(target, info) {
+    closePopover();
+    STATE.popoverTarget = target;
+
+    var pop = document.createElement('div');
+    pop.setAttribute('data-kuse-overlay', '1');
+    pop.style.cssText =
+      'position:fixed;z-index:' + (OVERLAY_Z + 3) + ';' +
+      'width:352px;max-width:calc(100vw - 16px);background:' + SURFACE + ';' +
+      'border:1px solid ' + BRAND_SOFT + ';border-radius:14px;' +
+      'padding:16px;box-shadow:0 20px 44px rgba(32,32,32,0.14);' +
+      "font:13px Poppins,system-ui,-apple-system,sans-serif;color:" + TEXT_PRIMARY + ';';
+
+    // Header: tag pill on the left, close (×) button on the right. Close
+    // is redundant with ESC, but ESC discoverability inside an iframe is
+    // close to zero — most users only realise the popover is dismissable
+    // when they see the X.
+    var headerRow = document.createElement('div');
+    headerRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:4px;';
+    var pill = document.createElement('div');
+    pill.style.cssText =
+      'flex:0 0 auto;padding:4px 12px;border-radius:999px;' +
+      'background:' + SURFACE_TINT + ';color:' + TEXT_MUTED + ';' +
+      'font-size:11px;font-weight:500;';
+    pill.textContent = humanLabel(info);
+    headerRow.appendChild(pill);
+    var headerSpacer = document.createElement('div');
+    headerSpacer.style.cssText = 'flex:1 1 auto;';
+    headerRow.appendChild(headerSpacer);
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.setAttribute('aria-label', tr('close'));
+    closeBtn.title = tr('closeEsc');
+    closeBtn.style.cssText =
+      'flex:0 0 auto;width:22px;height:22px;display:inline-flex;' +
+      'align-items:center;justify-content:center;border:none;' +
+      'background:transparent;color:' + TEXT_SECONDARY + ';font:inherit;font-size:18px;' +
+      'line-height:1;border-radius:6px;cursor:pointer;padding:0;' +
+      'transition:background 120ms,color 120ms;';
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('mouseenter', function () {
+      closeBtn.style.background = SURFACE_TINT;
+      closeBtn.style.color = TEXT_PRIMARY;
+    });
+    closeBtn.addEventListener('mouseleave', function () {
+      closeBtn.style.background = 'transparent';
+      closeBtn.style.color = TEXT_SECONDARY;
+    });
+    closeBtn.addEventListener('click', function () { closePopover(); });
+    headerRow.appendChild(closeBtn);
+    pop.appendChild(headerRow);
+
+    // Element text preview (what the user is commenting on). Omitted for
+    // containers that have no direct text of their own.
+    var snippet = (info.text || '').trim();
+    if (snippet) {
+      var preview = document.createElement('div');
+      preview.style.cssText =
+        'margin:2px 0 12px 0;font-size:12px;color:#4a4a46;line-height:1.45;' +
+        'overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;';
+      preview.textContent = '"' + (snippet.length > 140 ? snippet.slice(0, 140) + '…' : snippet) + '"';
+      pop.appendChild(preview);
+    } else {
+      var spacer = document.createElement('div');
+      spacer.style.cssText = 'height:6px;';
+      pop.appendChild(spacer);
+    }
+
+    var ta = document.createElement('textarea');
+    ta.placeholder = tr('placeholder');
+    ta.rows = 3;
+    ta.style.cssText =
+      'width:100%;box-sizing:border-box;resize:none;' +
+      'min-height:92px;border:1px solid ' + BRAND_SOFT + ';border-radius:12px;' +
+      'padding:14px 16px;font:inherit;font-size:13px;line-height:1.5;color:' + TEXT_PRIMARY + ';' +
+      'outline:none;background:' + SURFACE_ALT + ';' +
+      'transition:border-color 120ms,box-shadow 120ms;';
+    ta.addEventListener('focus', function () {
+      ta.style.borderColor = 'rgba(32,32,32,0.16)';
+      ta.style.boxShadow = '0 0 0 3px rgba(32,32,32,0.04)';
+    });
+    ta.addEventListener('blur', function () {
+      ta.style.borderColor = BRAND_SOFT;
+      ta.style.boxShadow = 'none';
+    });
+    pop.appendChild(ta);
+
+    // Actions row: Send is the primary path (single-comment-then-send is
+    // the common case). "Add another" is a low-key escape hatch for users
+    // who want to batch — it queues this comment and leaves comment mode
+    // active so they can click another element.
+    var actions = document.createElement('div');
+    actions.style.cssText =
+      'display:flex;align-items:flex-end;gap:10px;margin-top:12px;';
+    var hint = document.createElement('div');
+    hint.style.cssText = 'flex:1 1 auto;font-size:11px;line-height:1.45;color:' + TEXT_TERTIARY + ';';
+    hint.textContent = tr('enterToSend');
+    actions.appendChild(hint);
+
+    var addAnotherBtn = document.createElement('button');
+    addAnotherBtn.type = 'button';
+    addAnotherBtn.textContent = tr('addAnother');
+    addAnotherBtn.title = tr('addAnotherTitle');
+    addAnotherBtn.style.cssText =
+      'flex:0 0 auto;height:32px;padding:0 12px;border-radius:8px;' +
+      'background:' + SURFACE + ';border:1px solid ' + BRAND_SOFT + ';' +
+      'font:inherit;font-size:12px;font-weight:500;color:' + TEXT_PRIMARY + ';cursor:pointer;' +
+      'transition:background 120ms,border-color 120ms;';
+    addAnotherBtn.addEventListener('mouseenter', function () {
+      addAnotherBtn.style.background = SURFACE_TINT;
+      addAnotherBtn.style.borderColor = 'rgba(32,32,32,0.16)';
+    });
+    addAnotherBtn.addEventListener('mouseleave', function () {
+      addAnotherBtn.style.background = SURFACE;
+      addAnotherBtn.style.borderColor = BRAND_SOFT;
+    });
+    addAnotherBtn.addEventListener('click', function () { queueOnly(); });
+    actions.appendChild(addAnotherBtn);
+
+    var sendBtn = document.createElement('button');
+    sendBtn.type = 'button';
+    sendBtn.textContent = STATE.batch.length > 0
+      ? tr('sendAll', STATE.batch.length + 1)
+      : tr('send');
+    sendBtn.style.cssText =
+      'flex:0 0 auto;height:32px;padding:0 14px;border-radius:8px;border:none;' +
+      'background:' + BRAND + ';color:#ffffff;font:inherit;font-size:12px;font-weight:500;' +
+      'cursor:pointer;transition:background 120ms;';
+    sendBtn.addEventListener('mouseenter', function () { sendBtn.style.background = BRAND_HOVER; });
+    sendBtn.addEventListener('mouseleave', function () { sendBtn.style.background = BRAND; });
+    sendBtn.addEventListener('click', function () { sendNow(); });
+    actions.appendChild(sendBtn);
+    pop.appendChild(actions);
+
+    // Position below, fall back to above if overflowing.
+    var rect = target.getBoundingClientRect();
+    var popW = 352, popH = 220;
+    var top = rect.bottom + 8;
+    if (top + popH > window.innerHeight - 8) top = Math.max(8, rect.top - popH - 8);
+    var left = rect.left;
+    if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
+    left = Math.max(8, left);
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+
+    root().appendChild(pop);
+    STATE.popover = pop;
+    setTimeout(function () { ta.focus(); }, 30);
+
+    // queueOnly: push current comment into the batch, close popover but
+    // stay in comment mode so the user can pick another element.
+    function queueOnly() {
+      var comment = (ta.value || '').trim();
+      var id = STATE.nextId++;
+      var item = {
+        id: id,
+        target: target,
+        info: info,
+        comment: comment,
+        badge: null,
+        outline: null,
+      };
+      item.outline = makeSelectedOutline(target);
+      item.badge = makeBadge(STATE.batch.length + 1, item);
+      positionOutline(item);
+      positionBadge(item);
+      STATE.batch.push(item);
+      closePopover();
+      renderBatchBar();
+    }
+
+    // sendNow: queue the current comment, flush the whole batch to the
+    // parent, and exit comment mode. The default path for a single quick
+    // edit — one click, one comment, send.
+    function sendNow() {
+      queueOnly();
+      flushBatch();
+    }
+
+    ta.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendNow();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closePopover();
+      }
+    });
+  }
+
+  // flushBatch sends every queued item to the parent and exits comment
+  // mode. Shared between the popover Send button and the batch bar Send
+  // button so single-shot and multi-shot flows share one exit.
+  function flushBatch() {
+    if (STATE.batch.length === 0) return;
+    var payload = STATE.batch.map(function (item) {
+      return Object.assign({}, item.info, { comment: item.comment });
+    });
+    send({ type: 'kuse-edit:batch', elements: payload });
+    exitSelect();
+  }
+
+  // -------------------- event handlers --------------------
+
+  function isOurOverlay(el) {
+    while (el && el.nodeType === 1) {
+      if (el.getAttribute && el.getAttribute('data-kuse-overlay')) return true;
+      el = el.parentElement;
+    }
+    return false;
+  }
+
+  function onMove(e) {
+    if (STATE.mode !== 'selecting') return;
+    // Freeze hover while a popover is open so the highlighted target
+    // stays anchored to the element the user is commenting on. Without
+    // this guard the outline drifts under the cursor as the user moves
+    // toward the popover's textarea, which feels like the selection is
+    // being yanked away. The hover resumes tracking after closePopover.
+    if (STATE.popover) return;
+    if (isOurOverlay(e.target)) return;
+    moveHover(e.target);
+  }
+
+  function onClick(e) {
+    if (STATE.mode !== 'selecting') return;
+    if (isOurOverlay(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var info = extractInfo(e.target);
+    showPopover(e.target, info);
+  }
+
+  function onKey(e) {
+    if (STATE.mode !== 'selecting') return;
+    if (e.key === 'Escape') {
+      if (STATE.popover) closePopover();
+      else exitSelect();
+    }
+  }
+
+  function onScrollOrResize() {
+    if (STATE.mode !== 'selecting') return;
+    repositionAll();
+  }
+
+  // rAF loop keeps badges/outlines glued to their target while the
+  // document mutates (animations, layout shifts). Cheap: only runs in
+  // select mode and only touches DOM when batch is non-empty.
+  var rafHandle = null;
+  function startTick() {
+    if (rafHandle) return;
+    function tick() {
+      if (STATE.mode !== 'selecting') { rafHandle = null; return; }
+      if (STATE.batch.length > 0) repositionAll();
+      rafHandle = window.requestAnimationFrame(tick);
+    }
+    rafHandle = window.requestAnimationFrame(tick);
+  }
+
+  // -------------------- mode transitions --------------------
+
+  function enterSelect() {
+    if (STATE.mode === 'selecting') return;
+    STATE.mode = 'selecting';
+    document.body.style.cursor = 'crosshair';
+    window.addEventListener('mousemove', onMove, true);
+    window.addEventListener('click', onClick, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize, true);
+    startTick();
+    renderBatchBar();
+    send({ type: 'kuse-edit:entered' });
+  }
+
+  function exitSelect() {
+    var hadBatch = STATE.batch.length;
+    STATE.mode = 'idle';
+    document.body.style.cursor = '';
+    hideHover();
+    closePopover();
+    clearBatch();
+    if (STATE.batchBar) { STATE.batchBar.remove(); STATE.batchBar = null; }
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('click', onClick, true);
+    window.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('scroll', onScrollOrResize, true);
+    window.removeEventListener('resize', onScrollOrResize, true);
+    send({ type: 'kuse-edit:exited', hadBatch: hadBatch });
+  }
+
+  // -------------------- parent message listener --------------------
+
+  window.addEventListener('message', function (e) {
+    if (!e.data || typeof e.data !== 'object') return;
+    if (!isAllowedOrigin(e.origin)) return;
+    STATE.parentOrigin = e.origin;
+    if (e.data.type === 'kuse-edit:locale') {
+      if (typeof e.data.locale === 'string' && e.data.locale) {
+        STATE.locale = e.data.locale;
+        if (STATE.batchBar) renderBatchBar();
+      }
+    } else if (e.data.type === 'kuse-edit:enter') enterSelect();
+    else if (e.data.type === 'kuse-edit:exit') exitSelect();
+  });
+
+  // Fire-and-forget ready ping. Target is wildcard because we don't know
+  // the parent origin yet (it'll be revealed via the first inbound
+  // message above). No sensitive data in the payload.
+  window.parent.postMessage({ type: 'kuse-edit:ready' }, '*');
+})();
+</script>
+</head>
+  <body>
+    <script>
+      (function () {
+        function report(msg, stack) {
+          try {
+            var el = document.createElement('pre');
+            el.style.cssText =
+              'margin:24px;padding:16px;border:1px solid #fca5a5;' +
+              'background:#fef2f2;border-radius:8px;color:#7f1d1d;' +
+              'font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap;' +
+              'word-break:break-word;';
+            el.textContent =
+              '⚠️ Site failed to load.\n\n' +
+              (msg || 'unknown error') +
+              (stack ? '\n\n' + stack : '');
+            el.setAttribute('data-kuse-runtime-error', '1');
+            (document.body || document.documentElement).appendChild(el);
+          } catch (_) {}
+          try {
+            window.parent.postMessage(
+              {
+                type: 'kuse-site:runtime-error',
+                message: String(msg || 'unknown error'),
+                stack: stack ? String(stack) : '',
+              },
+              '*'
+            );
+          } catch (_) {}
+        }
+        window.addEventListener('error', function (e) {
+          report(e.message, e.error && e.error.stack);
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          report(
+            'UnhandledRejection: ' +
+              (e.reason && (e.reason.message || e.reason)),
+            e.reason && e.reason.stack
+          );
+        });
+      })();
+    </script>
+    <div id="root"></div>
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"c2194ca6c2724a9db3a46b10b854f687","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
